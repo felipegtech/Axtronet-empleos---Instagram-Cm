@@ -1,5 +1,6 @@
 import express from 'express';
 import Settings from '../models/Settings.js';
+import instagramService from '../services/instagramService.js';
 
 const router = express.Router();
 
@@ -183,6 +184,83 @@ router.put('/auto-reply', async (req, res) => {
     res.status(400).json({
       success: false,
       message: 'Error updating auto-reply settings',
+      error: error.message
+    });
+  }
+});
+
+// Validar token de Instagram
+router.post('/instagram/validate-token', async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token es requerido'
+      });
+    }
+
+    const tokenInfo = await instagramService.getTokenInfo(token);
+    const verification = await instagramService.verifyToken(token, false);
+    
+    // Obtener Instagram Business Account ID
+    const igBusinessAccountId = await instagramService.getInstagramBusinessAccountId();
+    
+    // Guardar token si es válido
+    if (tokenInfo.success && tokenInfo.isValid) {
+      const settings = await Settings.getSettings();
+      settings.instagram.pageAccessToken = token;
+      settings.instagram.connected = true;
+      settings.instagram.tokenScopes = tokenInfo.scopes || [];
+      settings.instagram.tokenExpiresAt = tokenInfo.expiresAt;
+      settings.instagram.igBusinessAccountId = igBusinessAccountId;
+      await settings.save();
+    }
+    
+    res.json({
+      success: true,
+      tokenInfo,
+      verification,
+      igBusinessAccountId,
+      message: tokenInfo.isValid ? 'Token válido y guardado' : 'Token inválido'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error validando token',
+      error: error.message
+    });
+  }
+});
+
+// Obtener información del token actual
+router.get('/instagram/token-info', async (req, res) => {
+  try {
+    const settings = await Settings.getSettings();
+    const token = settings.instagram?.pageAccessToken;
+    
+    if (!token) {
+      return res.json({
+        success: false,
+        message: 'No hay token configurado'
+      });
+    }
+
+    const tokenInfo = await instagramService.getTokenInfo(token);
+    const igBusinessAccountId = await instagramService.getInstagramBusinessAccountId();
+    
+    res.json({
+      success: true,
+      tokenInfo,
+      igBusinessAccountId,
+      expiresAt: settings.instagram.tokenExpiresAt,
+      scopes: settings.instagram.tokenScopes || []
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error obteniendo información del token',
       error: error.message
     });
   }

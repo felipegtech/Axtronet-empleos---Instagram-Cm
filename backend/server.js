@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import crypto from 'crypto';
+import path from 'path';
 import { cleanEnv, str, num, bool } from 'envalid';
 import Interaction from './models/Interaction.js';
 import JobOffer from './models/JobOffer.js';
@@ -18,6 +19,7 @@ import candidatesRoutes from './routes/candidates.js';
 import surveysRoutes from './routes/surveys.js';
 import autoReplyRoutes from './routes/autoReply.js';
 import settingsRoutes from './routes/settings.js';
+import uploadRoutes from './routes/upload.js';
 
 // Import services
 import autoReplyService from './services/autoReplyService.js';
@@ -376,7 +378,21 @@ function verifyInstagramSignature(req) {
 
 app.post('/webhook', async (req, res) => {
   try {
-    if (!verifyInstagramSignature(req)) {
+    // Log del webhook en la base de datos
+    const InstagramEvent = (await import('./models/InstagramEvent.js')).default;
+    const signatureValid = verifyInstagramSignature(req);
+    
+    const instagramEvent = new InstagramEvent({
+      eventType: 'comment', // Se actualizará según el tipo real
+      object: req.body.object || 'instagram',
+      entry: req.body.entry || [],
+      rawPayload: req.body,
+      signature: req.headers['x-hub-signature-256'] || req.headers['x-hub-signature'] || null,
+      signatureValid
+    });
+    await instagramEvent.save();
+
+    if (!signatureValid) {
       console.warn('❌ Invalid webhook signature');
       return res.status(401).json({
         success: false,
@@ -480,6 +496,13 @@ app.post('/webhook', async (req, res) => {
                 
                 await interaction.save();
                 
+                // Actualizar InstagramEvent con la interacción creada
+                instagramEvent.interactionId = interaction._id;
+                instagramEvent.eventType = 'dm';
+                instagramEvent.processed = true;
+                instagramEvent.processedAt = new Date();
+                await instagramEvent.save();
+                
                 // Validación segura antes de acceder a _id
                 if (interaction && interaction._id) {
                   console.log(`   💾 Interacción guardada: ${interaction._id}`);
@@ -517,9 +540,20 @@ app.post('/webhook', async (req, res) => {
                 if (!interaction) {
                   // Comentario ignorado por filtros (loop, duplicado, respuesta del bot)
                   console.log(`ℹ️ Comentario ignorado (evitando loop, duplicado o respuesta del bot)`);
+                  instagramEvent.processed = true;
+                  instagramEvent.processedAt = new Date();
+                  instagramEvent.metadata = { reason: 'ignored' };
+                  await instagramEvent.save();
                   // Continuar con el siguiente evento sin error - NO acceder a _id
                   continue;
                 }
+                
+                // Actualizar InstagramEvent con la interacción creada
+                instagramEvent.interactionId = interaction._id;
+                instagramEvent.eventType = 'comment';
+                instagramEvent.processed = true;
+                instagramEvent.processedAt = new Date();
+                await instagramEvent.save();
                 
                 // Ahora sabemos que interaction existe, pero aún verificamos _id de forma segura
                 if (interaction && interaction._id) {
@@ -566,6 +600,13 @@ app.post('/webhook', async (req, res) => {
                 });
                 
                 await interaction.save();
+                
+                // Actualizar InstagramEvent
+                instagramEvent.interactionId = interaction._id;
+                instagramEvent.eventType = 'reaction';
+                instagramEvent.processed = true;
+                instagramEvent.processedAt = new Date();
+                await instagramEvent.save();
                 
                 // Validación segura antes de acceder a _id
                 if (interaction && interaction._id) {
@@ -758,6 +799,12 @@ app.use('/api/candidates', candidatesRoutes);
 app.use('/api/surveys', surveysRoutes);
 app.use('/api/auto-reply', autoReplyRoutes);
 app.use('/api/settings', settingsRoutes);
+
+// Upload routes
+app.use('/api/upload', uploadRoutes);
+
+// Servir archivos estáticos de uploads
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // New endpoints for full functionality
 
@@ -954,6 +1001,92 @@ app.post('/api/interactions/:id/analyze', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error analyzing interaction',
+      error: error.message
+    });
+  }
+});
+
+// Obtener insights de un post de Instagram
+app.get('/api/instagram/posts/:postId/insights', async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const { metrics } = req.query;
+    
+    const metricsArray = metrics ? metrics.split(',') : ['impressions', 'reach', 'likes', 'comments', 'saved', 'shares'];
+    const result = await instagramService.getPostInsights(postId, metricsArray);
+    
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error obteniendo insights',
+      error: error.message
+    });
+  }
+});
+
+// Refrescar token de Instagram
+app.post('/api/instagram/refresh-token', async (req, res) => {
+  try {
+    const { shortLivedToken } = req.body;
+    
+    if (!shortLivedToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'shortLivedToken es requerido'
+      });
+    }
+
+    const result = await instagramService.refreshToken(shortLivedToken);
+    
+    // Guardar el token refrescado en Settings
+    const Settings = (await import('./models/Settings.js')).default;
+    const settings = await Settings.getSettings();
+    settings.instagram.pageAccessToken = result.accessToken;
+    settings.instagram.tokenExpiresAt = result.expiresAt;
+    await settings.save();
+    
+    res.json({
+      success: true,
+      ...result,
+      message: 'Token refrescado y guardado exitosamente'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error refrescando token',
+      error: error.message
+    });
+  }
+});
+
+// Obtener información del token
+app.get('/api/instagram/token-info', async (req, res) => {
+  try {
+    const { token } = req.query;
+    const result = await instagramService.getTokenInfo(token || null);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error obteniendo información del token',
+      error: error.message
+    });
+  }
+});
+
+// Obtener Instagram Business Account ID
+app.get('/api/instagram/business-account-id', async (req, res) => {
+  try {
+    const igBusinessAccountId = await instagramService.getInstagramBusinessAccountId();
+    res.json({
+      success: true,
+      igBusinessAccountId
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error obteniendo Instagram Business Account ID',
       error: error.message
     });
   }

@@ -1,6 +1,15 @@
 import axios from 'axios';
+import FormData from 'form-data';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const INSTAGRAM_API_URL = 'https://graph.instagram.com';
+const FACEBOOK_API_URL = 'https://graph.facebook.com';
+const API_VERSION = 'v18.0';
 
 class InstagramService {
   // Validar y limpiar token
@@ -94,49 +103,492 @@ class InstagramService {
       return null;
     }
   }
-  // Simular publicación de post
-  async publishPost(imageUrl, caption, hashtags = []) {
+  // Publicar imagen en Instagram usando Graph API
+  async publishPost(imagePathOrUrl, caption, hashtags = [], igBusinessAccountId = null) {
     try {
-      // En producción, esto usaría la API real de Instagram
-      // Por ahora simulamos la respuesta
-      const hashtagsString = hashtags.map(tag => `#${tag}`).join(' ');
-      const fullCaption = `${caption}\n\n${hashtagsString}`;
+      console.log('\n📤 [PUBLISH-POST] Iniciando publicación de imagen...');
       
-      const postId = `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const accessToken = await this.getAccessToken();
+      if (!accessToken) {
+        throw new Error('Instagram Page Access Token no configurado');
+      }
+
+      // Obtener Instagram Business Account ID si no se proporciona
+      if (!igBusinessAccountId) {
+        igBusinessAccountId = await this.getInstagramBusinessAccountId();
+        if (!igBusinessAccountId) {
+          throw new Error('No se pudo obtener Instagram Business Account ID');
+        }
+      }
+
+      const hashtagsString = hashtags.length > 0 ? '\n\n' + hashtags.map(tag => `#${tag}`).join(' ') : '';
+      const fullCaption = `${caption}${hashtagsString}`;
+
+      // Paso 1: Subir la imagen y crear el contenedor de medios
+      let imageUrl = imagePathOrUrl;
+      let imageBuffer = null;
+
+      // Si es una ruta de archivo local, leerlo
+      // Puede ser una ruta absoluta, relativa, o una URL que empiece con http pero apunte a nuestro servidor
+      let filePath = null;
       
-      console.log('📤 Publishing post to Instagram:', {
-        postId,
-        caption: fullCaption,
-        imageUrl
-      });
+      if (imagePathOrUrl.startsWith('http://localhost') || imagePathOrUrl.startsWith('http://127.0.0.1')) {
+        // Es una URL local, convertir a ruta de archivo
+        const urlPath = imagePathOrUrl.replace(/^https?:\/\/[^\/]+/, '');
+        filePath = path.join(__dirname, '..', urlPath);
+      } else if (imagePathOrUrl.startsWith('/uploads') || imagePathOrUrl.startsWith('uploads')) {
+        // Es una ruta relativa
+        filePath = path.join(__dirname, '..', imagePathOrUrl.startsWith('/') ? imagePathOrUrl : '/' + imagePathOrUrl);
+      } else if (path.isAbsolute(imagePathOrUrl)) {
+        // Es una ruta absoluta
+        filePath = imagePathOrUrl;
+      }
       
+      if (filePath && fs.existsSync(filePath)) {
+        imageBuffer = fs.readFileSync(filePath);
+        console.log(`   📁 Imagen leída desde: ${filePath}`);
+      } else if (filePath) {
+        throw new Error(`Archivo no encontrado: ${filePath}`);
+      }
+
+      // Si tenemos un buffer, subirlo usando form-data
+      let creationId;
+      if (imageBuffer) {
+        console.log('   📤 Subiendo imagen a Instagram...');
+        const formData = new FormData();
+        formData.append('image_file', imageBuffer, {
+          filename: path.basename(imagePathOrUrl),
+          contentType: 'image/jpeg'
+        });
+        formData.append('caption', fullCaption);
+        formData.append('access_token', accessToken);
+
+        const uploadResponse = await axios.post(
+          `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media`,
+          formData,
+          {
+            headers: formData.getHeaders(),
+            timeout: 60000
+          }
+        );
+
+        creationId = uploadResponse.data.id;
+        console.log(`   ✅ Contenedor creado: ${creationId}`);
+      } else if (imageUrl) {
+        // Si es una URL, usar el método de URL
+        console.log('   📤 Creando contenedor con URL...');
+        const response = await axios.post(
+          `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media`,
+          null,
+          {
+            params: {
+              image_url: imageUrl,
+              caption: fullCaption,
+              access_token: accessToken
+            },
+            timeout: 30000
+          }
+        );
+        creationId = response.data.id;
+        console.log(`   ✅ Contenedor creado: ${creationId}`);
+      } else {
+        throw new Error('Se requiere imagePathOrUrl o imageBuffer');
+      }
+
+      // Paso 2: Publicar el contenedor
+      console.log('   📤 Publicando contenedor...');
+      const publishResponse = await axios.post(
+        `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media_publish`,
+        null,
+        {
+          params: {
+            creation_id: creationId,
+            access_token: accessToken
+          },
+          timeout: 30000
+        }
+      );
+
+      const postId = publishResponse.data.id;
+      console.log(`   ✅ Post publicado: ${postId}`);
+
+      // Paso 3: Obtener el permalink
+      let permalink = null;
+      try {
+        const permalinkResponse = await axios.get(
+          `${INSTAGRAM_API_URL}/${postId}`,
+          {
+            params: {
+              fields: 'permalink',
+              access_token: accessToken
+            }
+          }
+        );
+        permalink = permalinkResponse.data.permalink;
+      } catch (err) {
+        console.warn('   ⚠️ No se pudo obtener permalink:', err.message);
+        permalink = `https://www.instagram.com/p/${postId}/`;
+      }
+
+      console.log(`\n✅ POST PUBLICADO EXITOSAMENTE EN INSTAGRAM!`);
+      console.log(`   Post ID: ${postId}`);
+      console.log(`   Permalink: ${permalink}`);
+      console.log(`   Caption: ${fullCaption.substring(0, 50)}...`);
+
       return {
         success: true,
         postId,
-        permalink: `https://www.instagram.com/p/${postId}/`,
-        caption: fullCaption
+        permalink,
+        caption: fullCaption,
+        creationId
       };
     } catch (error) {
-      console.error('Error publishing post:', error);
+      console.error('\n❌ ERROR PUBLICANDO POST:', error.message);
+      if (error.response) {
+        console.error('   Status:', error.response.status);
+        console.error('   Data:', JSON.stringify(error.response.data, null, 2));
+      }
       throw error;
     }
   }
 
-  // Simular publicación de story
+  // Publicar carrusel en Instagram
+  async publishCarousel(imagePaths, caption, hashtags = [], igBusinessAccountId = null) {
+    try {
+      console.log('\n📤 [PUBLISH-CAROUSEL] Iniciando publicación de carrusel...');
+      
+      const accessToken = await this.getAccessToken();
+      if (!accessToken) {
+        throw new Error('Instagram Page Access Token no configurado');
+      }
+
+      if (!igBusinessAccountId) {
+        igBusinessAccountId = await this.getInstagramBusinessAccountId();
+        if (!igBusinessAccountId) {
+          throw new Error('No se pudo obtener Instagram Business Account ID');
+        }
+      }
+
+      if (!Array.isArray(imagePaths) || imagePaths.length < 2 || imagePaths.length > 10) {
+        throw new Error('El carrusel debe tener entre 2 y 10 imágenes');
+      }
+
+      const hashtagsString = hashtags.length > 0 ? '\n\n' + hashtags.map(tag => `#${tag}`).join(' ') : '';
+      const fullCaption = `${caption}${hashtagsString}`;
+
+      // Paso 1: Crear contenedores para cada imagen
+      const children = [];
+      for (let i = 0; i < imagePaths.length; i++) {
+        const imagePath = imagePaths[i];
+        let imageBuffer = null;
+
+        // Manejar diferentes formatos de ruta
+        let filePath = null;
+        
+        if (imagePath.startsWith('http://localhost') || imagePath.startsWith('http://127.0.0.1')) {
+          const urlPath = imagePath.replace(/^https?:\/\/[^\/]+/, '');
+          filePath = path.join(__dirname, '..', urlPath);
+        } else if (imagePath.startsWith('/uploads') || imagePath.startsWith('uploads')) {
+          filePath = path.join(__dirname, '..', imagePath.startsWith('/') ? imagePath : '/' + imagePath);
+        } else if (path.isAbsolute(imagePath)) {
+          filePath = imagePath;
+        }
+        
+        if (filePath && fs.existsSync(filePath)) {
+          imageBuffer = fs.readFileSync(filePath);
+        } else if (filePath) {
+          throw new Error(`Archivo no encontrado: ${filePath}`);
+        }
+
+        if (imageBuffer) {
+          const formData = new FormData();
+          formData.append('image_file', imageBuffer, {
+            filename: path.basename(imagePath),
+            contentType: 'image/jpeg'
+          });
+          formData.append('is_carousel_item', 'true');
+          formData.append('access_token', accessToken);
+
+          const response = await axios.post(
+            `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media`,
+            formData,
+            {
+              headers: formData.getHeaders(),
+              timeout: 60000
+            }
+          );
+
+          children.push(response.data.id);
+          console.log(`   ✅ Imagen ${i + 1}/${imagePaths.length} subida: ${response.data.id}`);
+        }
+      }
+
+      // Paso 2: Crear el contenedor del carrusel
+      console.log('   📤 Creando contenedor del carrusel...');
+      const carouselResponse = await axios.post(
+        `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media`,
+        null,
+        {
+          params: {
+            media_type: 'CAROUSEL',
+            children: children.join(','),
+            caption: fullCaption,
+            access_token: accessToken
+          },
+          timeout: 30000
+        }
+      );
+
+      const creationId = carouselResponse.data.id;
+      console.log(`   ✅ Contenedor del carrusel creado: ${creationId}`);
+
+      // Paso 3: Publicar el carrusel
+      console.log('   📤 Publicando carrusel...');
+      const publishResponse = await axios.post(
+        `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media_publish`,
+        null,
+        {
+          params: {
+            creation_id: creationId,
+            access_token: accessToken
+          },
+          timeout: 30000
+        }
+      );
+
+      const postId = publishResponse.data.id;
+      console.log(`   ✅ Carrusel publicado: ${postId}`);
+
+      // Obtener permalink
+      let permalink = null;
+      try {
+        const permalinkResponse = await axios.get(
+          `${INSTAGRAM_API_URL}/${postId}`,
+          {
+            params: {
+              fields: 'permalink',
+              access_token: accessToken
+            }
+          }
+        );
+        permalink = permalinkResponse.data.permalink;
+      } catch (err) {
+        permalink = `https://www.instagram.com/p/${postId}/`;
+      }
+
+      console.log(`\n✅ CARRUSEL PUBLICADO EXITOSAMENTE!`);
+      console.log(`   Post ID: ${postId}`);
+      console.log(`   Permalink: ${permalink}`);
+
+      return {
+        success: true,
+        postId,
+        permalink,
+        caption: fullCaption,
+        creationId,
+        children
+      };
+    } catch (error) {
+      console.error('\n❌ ERROR PUBLICANDO CARRUSEL:', error.message);
+      if (error.response) {
+        console.error('   Status:', error.response.status);
+        console.error('   Data:', JSON.stringify(error.response.data, null, 2));
+      }
+      throw error;
+    }
+  }
+
+  // Publicar Reel/Video en Instagram
+  async publishReel(videoPathOrUrl, caption, hashtags = [], coverUrl = null, igBusinessAccountId = null) {
+    try {
+      console.log('\n📤 [PUBLISH-REEL] Iniciando publicación de reel...');
+      
+      const accessToken = await this.getAccessToken();
+      if (!accessToken) {
+        throw new Error('Instagram Page Access Token no configurado');
+      }
+
+      if (!igBusinessAccountId) {
+        igBusinessAccountId = await this.getInstagramBusinessAccountId();
+        if (!igBusinessAccountId) {
+          throw new Error('No se pudo obtener Instagram Business Account ID');
+        }
+      }
+
+      const hashtagsString = hashtags.length > 0 ? '\n\n' + hashtags.map(tag => `#${tag}`).join(' ') : '';
+      const fullCaption = `${caption}${hashtagsString}`;
+
+      // Leer el video si es una ruta local
+      let videoBuffer = null;
+      let filePath = null;
+      
+      if (videoPathOrUrl.startsWith('http://localhost') || videoPathOrUrl.startsWith('http://127.0.0.1')) {
+        const urlPath = videoPathOrUrl.replace(/^https?:\/\/[^\/]+/, '');
+        filePath = path.join(__dirname, '..', urlPath);
+      } else if (videoPathOrUrl.startsWith('/uploads') || videoPathOrUrl.startsWith('uploads')) {
+        filePath = path.join(__dirname, '..', videoPathOrUrl.startsWith('/') ? videoPathOrUrl : '/' + videoPathOrUrl);
+      } else if (path.isAbsolute(videoPathOrUrl)) {
+        filePath = videoPathOrUrl;
+      }
+      
+      if (filePath && fs.existsSync(filePath)) {
+        videoBuffer = fs.readFileSync(filePath);
+        console.log(`   📁 Video leído desde: ${filePath}`);
+      } else if (filePath) {
+        throw new Error(`Archivo no encontrado: ${filePath}`);
+      }
+
+      // Paso 1: Subir el video
+      let creationId;
+      if (videoBuffer) {
+        console.log('   📤 Subiendo video a Instagram...');
+        const formData = new FormData();
+        formData.append('video_file', videoBuffer, {
+          filename: path.basename(videoPathOrUrl),
+          contentType: 'video/mp4'
+        });
+        formData.append('caption', fullCaption);
+        if (coverUrl) {
+          formData.append('cover_url', coverUrl);
+        }
+        formData.append('media_type', 'REELS');
+        formData.append('access_token', accessToken);
+
+        const uploadResponse = await axios.post(
+          `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media`,
+          formData,
+          {
+            headers: formData.getHeaders(),
+            timeout: 300000 // 5 minutos para videos
+          }
+        );
+
+        creationId = uploadResponse.data.id;
+        console.log(`   ✅ Contenedor creado: ${creationId}`);
+      } else if (videoPathOrUrl) {
+        // Si es una URL
+        const params = {
+          media_type: 'REELS',
+          video_url: videoPathOrUrl,
+          caption: fullCaption,
+          access_token: accessToken
+        };
+        if (coverUrl) {
+          params.cover_url = coverUrl;
+        }
+
+        const response = await axios.post(
+          `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media`,
+          null,
+          { params, timeout: 30000 }
+        );
+        creationId = response.data.id;
+        console.log(`   ✅ Contenedor creado: ${creationId}`);
+      } else {
+        throw new Error('Se requiere videoPathOrUrl o videoBuffer');
+      }
+
+      // Paso 2: Esperar a que el video se procese (puede tardar)
+      console.log('   ⏳ Esperando procesamiento del video...');
+      let status = 'IN_PROGRESS';
+      let attempts = 0;
+      const maxAttempts = 30; // 5 minutos máximo
+
+      while (status === 'IN_PROGRESS' && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 10000)); // Esperar 10 segundos
+        
+        try {
+          const statusResponse = await axios.get(
+            `${INSTAGRAM_API_URL}/${creationId}`,
+            {
+              params: {
+                fields: 'status_code',
+                access_token: accessToken
+              }
+            }
+          );
+          status = statusResponse.data.status_code;
+          attempts++;
+          console.log(`   ⏳ Intento ${attempts}/${maxAttempts} - Estado: ${status}`);
+        } catch (err) {
+          console.warn('   ⚠️ Error verificando estado:', err.message);
+          attempts++;
+        }
+      }
+
+      if (status !== 'FINISHED') {
+        throw new Error(`El video no se procesó correctamente. Estado: ${status}`);
+      }
+
+      // Paso 3: Publicar el reel
+      console.log('   📤 Publicando reel...');
+      const publishResponse = await axios.post(
+        `${INSTAGRAM_API_URL}/${igBusinessAccountId}/media_publish`,
+        null,
+        {
+          params: {
+            creation_id: creationId,
+            access_token: accessToken
+          },
+          timeout: 30000
+        }
+      );
+
+      const postId = publishResponse.data.id;
+      console.log(`   ✅ Reel publicado: ${postId}`);
+
+      // Obtener permalink
+      let permalink = null;
+      try {
+        const permalinkResponse = await axios.get(
+          `${INSTAGRAM_API_URL}/${postId}`,
+          {
+            params: {
+              fields: 'permalink',
+              access_token: accessToken
+            }
+          }
+        );
+        permalink = permalinkResponse.data.permalink;
+      } catch (err) {
+        permalink = `https://www.instagram.com/reel/${postId}/`;
+      }
+
+      console.log(`\n✅ REEL PUBLICADO EXITOSAMENTE!`);
+      console.log(`   Post ID: ${postId}`);
+      console.log(`   Permalink: ${permalink}`);
+
+      return {
+        success: true,
+        postId,
+        permalink,
+        caption: fullCaption,
+        creationId
+      };
+    } catch (error) {
+      console.error('\n❌ ERROR PUBLICANDO REEL:', error.message);
+      if (error.response) {
+        console.error('   Status:', error.response.status);
+        console.error('   Data:', JSON.stringify(error.response.data, null, 2));
+      }
+      throw error;
+    }
+  }
+
+  // Publicar story (simulado - Instagram Graph API tiene limitaciones para stories)
   async publishStory(imageUrl, stickerData = null) {
     try {
-      const storyId = `story_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      console.log('📱 [PUBLISH-STORY] Nota: Instagram Graph API tiene limitaciones para stories');
+      console.log('   💡 Se recomienda usar la app móvil de Instagram para publicar stories');
       
-      console.log('📱 Publishing story to Instagram:', {
-        storyId,
-        imageUrl,
-        stickerData
-      });
+      // Por ahora retornamos un ID simulado
+      const storyId = `story_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       
       return {
         success: true,
         storyId,
-        imageUrl
+        imageUrl,
+        note: 'Story publication requires Instagram mobile app or Instagram Basic Display API'
       };
     } catch (error) {
       console.error('Error publishing story:', error);
@@ -622,6 +1074,153 @@ class InstagramService {
     } catch (error) {
       console.error('Error getting user info:', error);
       throw error;
+    }
+  }
+
+  // Obtener insights de un post publicado
+  async getPostInsights(postId, metrics = ['impressions', 'reach', 'likes', 'comments', 'saved', 'shares']) {
+    try {
+      console.log(`\n📊 [GET-INSIGHTS] Obteniendo insights para post: ${postId}`);
+      
+      const accessToken = await this.getAccessToken();
+      if (!accessToken) {
+        throw new Error('Instagram Page Access Token no configurado');
+      }
+
+      const igBusinessAccountId = await this.getInstagramBusinessAccountId();
+      if (!igBusinessAccountId) {
+        throw new Error('No se pudo obtener Instagram Business Account ID');
+      }
+
+      // Obtener insights usando Instagram Graph API
+      const response = await axios.get(
+        `${INSTAGRAM_API_URL}/${postId}/insights`,
+        {
+          params: {
+            metric: metrics.join(','),
+            access_token: accessToken
+          },
+          timeout: 30000
+        }
+      );
+
+      const insights = {};
+      if (response.data && response.data.data) {
+        response.data.data.forEach(metric => {
+          insights[metric.name] = metric.values[0]?.value || 0;
+        });
+      }
+
+      console.log(`   ✅ Insights obtenidos:`, insights);
+
+      return {
+        success: true,
+        postId,
+        insights,
+        timestamp: new Date()
+      };
+    } catch (error) {
+      console.error('❌ Error obteniendo insights:', error.message);
+      if (error.response) {
+        console.error('   Status:', error.response.status);
+        console.error('   Data:', JSON.stringify(error.response.data, null, 2));
+      }
+      // Retornar insights vacíos en caso de error
+      return {
+        success: false,
+        postId,
+        insights: {},
+        error: error.message
+      };
+    }
+  }
+
+  // Refrescar token de acceso (convertir short-lived a long-lived)
+  async refreshToken(shortLivedToken) {
+    try {
+      console.log('\n🔄 [REFRESH-TOKEN] Refrescando token...');
+      
+      const appId = process.env.INSTAGRAM_APP_ID;
+      const appSecret = process.env.INSTAGRAM_APP_SECRET;
+
+      if (!appId || !appSecret) {
+        throw new Error('INSTAGRAM_APP_ID e INSTAGRAM_APP_SECRET deben estar configurados');
+      }
+
+      // Convertir short-lived token a long-lived token
+      const response = await axios.get(
+        `${FACEBOOK_API_URL}/${API_VERSION}/oauth/access_token`,
+        {
+          params: {
+            grant_type: 'fb_exchange_token',
+            client_id: appId,
+            client_secret: appSecret,
+            fb_exchange_token: shortLivedToken
+          },
+          timeout: 30000
+        }
+      );
+
+      const longLivedToken = response.data.access_token;
+      const expiresIn = response.data.expires_in || 5184000; // 60 días por defecto
+
+      console.log(`   ✅ Token refrescado exitosamente`);
+      console.log(`   Expira en: ${expiresIn} segundos (${Math.floor(expiresIn / 86400)} días)`);
+
+      return {
+        success: true,
+        accessToken: longLivedToken,
+        expiresIn,
+        expiresAt: new Date(Date.now() + expiresIn * 1000)
+      };
+    } catch (error) {
+      console.error('❌ Error refrescando token:', error.message);
+      if (error.response) {
+        console.error('   Status:', error.response.status);
+        console.error('   Data:', JSON.stringify(error.response.data, null, 2));
+      }
+      throw error;
+    }
+  }
+
+  // Obtener información del token (scopes, expiración, etc.)
+  async getTokenInfo(accessToken = null) {
+    try {
+      const token = accessToken || await this.getAccessToken();
+      if (!token) {
+        throw new Error('Token no disponible');
+      }
+
+      // Obtener información del token usando Facebook Graph API
+      const response = await axios.get(
+        `${FACEBOOK_API_URL}/${API_VERSION}/debug_token`,
+        {
+          params: {
+            input_token: token,
+            access_token: token
+          },
+          timeout: 30000
+        }
+      );
+
+      const tokenData = response.data.data;
+      
+      return {
+        success: true,
+        appId: tokenData.app_id,
+        userId: tokenData.user_id,
+        expiresAt: tokenData.expires_at ? new Date(tokenData.expires_at * 1000) : null,
+        isValid: tokenData.is_valid,
+        scopes: tokenData.scopes || [],
+        type: tokenData.type,
+        application: tokenData.application
+      };
+    } catch (error) {
+      console.error('Error obteniendo información del token:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 }

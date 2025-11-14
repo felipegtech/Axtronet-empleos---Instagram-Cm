@@ -22,6 +22,29 @@ const jobOfferSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // Soporte para videos/reels
+  videoUrl: {
+    type: String,
+    default: null
+  },
+  videoPath: {
+    type: String,
+    default: null
+  },
+  coverImageUrl: {
+    type: String,
+    default: null
+  },
+  // Soporte para carruseles
+  mediaType: {
+    type: String,
+    enum: ['image', 'video', 'carousel', 'reel'],
+    default: 'image'
+  },
+  carouselImages: [{
+    url: String,
+    path: String
+  }],
   published: {
     type: Boolean,
     default: false

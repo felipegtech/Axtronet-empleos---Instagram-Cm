@@ -17,16 +17,83 @@ class PublishingService {
       const caption = `${jobOffer.title}\n\n${jobOffer.description}\n\n${hashtagsString}`;
 
       let result;
+      const igBusinessAccountId = await instagramService.getInstagramBusinessAccountId();
+
       if (type === 'story') {
         result = await instagramService.publishStory(jobOffer.imageUrl);
         jobOffer.instagramPostId = result.storyId;
+      } else if (jobOffer.mediaType === 'carousel' && jobOffer.carouselImages && jobOffer.carouselImages.length > 1) {
+        // Publicar carrusel
+        const imagePaths = jobOffer.carouselImages.map(img => {
+          // Preferir path absoluto, si no usar url
+          if (img.path) return img.path;
+          if (img.url) return img.url;
+          return null;
+        }).filter(Boolean);
+        
+        if (imagePaths.length < 2) {
+          throw new Error('El carrusel debe tener al menos 2 imágenes');
+        }
+        
+        result = await instagramService.publishCarousel(
+          imagePaths,
+          caption,
+          jobOffer.hashtags,
+          igBusinessAccountId
+        );
+        jobOffer.instagramPostId = result.postId;
+      } else if (jobOffer.mediaType === 'reel' || jobOffer.mediaType === 'video') {
+        // Publicar reel/video
+        const videoPath = jobOffer.videoPath || jobOffer.videoUrl;
+        if (!videoPath) {
+          throw new Error('Se requiere un video para publicar un reel');
+        }
+        
+        result = await instagramService.publishReel(
+          videoPath,
+          caption,
+          jobOffer.hashtags,
+          jobOffer.coverImageUrl,
+          igBusinessAccountId
+        );
+        jobOffer.instagramPostId = result.postId;
       } else {
-        result = await instagramService.publishPost(jobOffer.imageUrl, caption, jobOffer.hashtags);
+        // Publicar imagen simple
+        const imagePath = jobOffer.imagePath || jobOffer.imageUrl;
+        if (!imagePath) {
+          throw new Error('Se requiere una imagen para publicar');
+        }
+        
+        result = await instagramService.publishPost(
+          imagePath,
+          caption,
+          jobOffer.hashtags,
+          igBusinessAccountId
+        );
         jobOffer.instagramPostId = result.postId;
       }
 
       jobOffer.published = true;
       jobOffer.publishedAt = new Date();
+      jobOffer.analytics = jobOffer.analytics || {};
+      
+      // Obtener insights iniciales después de publicar (con delay)
+      setTimeout(async () => {
+        try {
+          const insights = await instagramService.getPostInsights(result.postId);
+          if (insights.success) {
+            jobOffer.analytics.reactions = insights.insights.likes || 0;
+            jobOffer.analytics.comments = insights.insights.comments || 0;
+            jobOffer.analytics.reach = insights.insights.reach || 0;
+            jobOffer.analytics.impressions = insights.insights.impressions || 0;
+            jobOffer.analytics.saves = insights.insights.saved || 0;
+            await jobOffer.save();
+          }
+        } catch (err) {
+          console.error('Error obteniendo insights:', err.message);
+        }
+      }, 10000); // Esperar 10 segundos después de publicar
+
       await jobOffer.save();
 
       return {

@@ -8,6 +8,9 @@ function Settings() {
   const [settings, setSettings] = useState(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('instagram')
+  const [tokenInfo, setTokenInfo] = useState(null)
+  const [validatingToken, setValidatingToken] = useState(false)
+  const [tokenInput, setTokenInput] = useState('')
   const [newMember, setNewMember] = useState({
     email: '',
     role: 'viewer',
@@ -21,7 +24,47 @@ function Settings() {
 
   useEffect(() => {
     fetchSettings()
+    fetchTokenInfo()
   }, [])
+
+  const fetchTokenInfo = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/settings/instagram/token-info`)
+      if (response.data.success) {
+        setTokenInfo(response.data)
+      }
+    } catch (error) {
+      console.error('Error fetching token info:', error)
+    }
+  }
+
+  const validateToken = async () => {
+    if (!tokenInput.trim()) {
+      alert('Por favor ingresa un token')
+      return
+    }
+
+    try {
+      setValidatingToken(true)
+      const response = await axios.post(`${API_BASE_URL}/api/settings/instagram/validate-token`, {
+        token: tokenInput
+      })
+
+      if (response.data.success && response.data.tokenInfo.isValid) {
+        alert('✅ Token válido y guardado exitosamente')
+        setTokenInput('')
+        fetchSettings()
+        fetchTokenInfo()
+      } else {
+        alert('❌ Token inválido: ' + (response.data.tokenInfo.error || 'Token no válido'))
+      }
+    } catch (error) {
+      console.error('Error validating token:', error)
+      alert('Error validando token: ' + (error.response?.data?.message || error.message))
+    } finally {
+      setValidatingToken(false)
+    }
+  }
 
   const fetchSettings = async () => {
     try {
@@ -165,32 +208,81 @@ function Settings() {
                   <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-2">
                     Page Access Token <span className="text-red-500">*</span>
                   </label>
-                  <input
-                    type="password"
-                    defaultValue={settings.instagram?.pageAccessToken || ''}
-                    onBlur={(e) => updateInstagramSettings({ pageAccessToken: e.target.value })}
-                    placeholder="Ingresa tu Page Access Token de Instagram"
-                    className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
-                      !settings.instagram?.pageAccessToken 
-                        ? 'border-red-300 bg-red-50' 
-                        : 'border-gray-300'
-                    }`}
-                  />
+                  <div className="flex space-x-2">
+                    <input
+                      type="password"
+                      value={tokenInput}
+                      onChange={(e) => setTokenInput(e.target.value)}
+                      placeholder="Pega tu Page Access Token aquí"
+                      className={`flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 ${
+                        !settings.instagram?.pageAccessToken 
+                          ? 'border-red-300 dark:border-red-600' 
+                          : 'border-gray-300 dark:border-slate-600'
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={validateToken}
+                      disabled={validatingToken || !tokenInput.trim()}
+                      className="bg-blue-600 dark:bg-blue-700 text-white px-4 py-2 rounded-lg hover:bg-blue-700 dark:hover:bg-blue-800 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {validatingToken ? 'Validando...' : 'Validar'}
+                    </button>
+                  </div>
+                  
                   {!settings.instagram?.pageAccessToken && (
-                    <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
-                      <p className="text-sm text-red-800">
-                        <strong>⚠️ Requerido para Auto-Reply:</strong> Este token es necesario para que el sistema pueda responder automáticamente a los comentarios de Instagram.
+                    <div className="mt-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                      <p className="text-sm text-red-800 dark:text-red-300 font-semibold mb-2">
+                        ⚠️ Requerido para Publicación y Auto-Reply
                       </p>
-                      <p className="text-xs text-red-600 mt-1">
-                        Obtén tu token en: <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" className="underline">Facebook Graph API Explorer</a>
+                      <p className="text-xs text-red-700 dark:text-red-400 mb-2">
+                        Este token es necesario para publicar contenido y responder automáticamente a comentarios.
+                      </p>
+                      <p className="text-xs text-red-600 dark:text-red-500">
+                        Obtén tu token en: <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" className="underline font-semibold">Facebook Graph API Explorer</a>
                       </p>
                     </div>
                   )}
-                  {settings.instagram?.pageAccessToken && (
-                    <div className="mt-2 p-3 bg-green-50 border border-green-200 rounded-lg">
-                      <p className="text-sm text-green-800">
-                        ✅ Token configurado correctamente
-                      </p>
+                  
+                  {tokenInfo && tokenInfo.success && (
+                    <div className="mt-4 p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg border border-slate-200 dark:border-slate-600">
+                      <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Información del Token</h3>
+                      <div className="space-y-2 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-slate-600 dark:text-slate-400">Estado:</span>
+                          <span className={`font-semibold ${tokenInfo.tokenInfo.isValid ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                            {tokenInfo.tokenInfo.isValid ? '✅ Válido' : '❌ Inválido'}
+                          </span>
+                        </div>
+                        {tokenInfo.tokenInfo.expiresAt && (
+                          <div className="flex justify-between">
+                            <span className="text-slate-600 dark:text-slate-400">Expira:</span>
+                            <span className="text-slate-900 dark:text-slate-100 font-medium">
+                              {new Date(tokenInfo.tokenInfo.expiresAt).toLocaleDateString('es-ES')}
+                            </span>
+                          </div>
+                        )}
+                        {tokenInfo.tokenInfo.scopes && tokenInfo.tokenInfo.scopes.length > 0 && (
+                          <div>
+                            <span className="text-slate-600 dark:text-slate-400">Permisos:</span>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {tokenInfo.tokenInfo.scopes.map((scope, idx) => (
+                                <span key={idx} className="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 text-xs rounded">
+                                  {scope}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {tokenInfo.igBusinessAccountId && (
+                          <div className="flex justify-between">
+                            <span className="text-slate-600 dark:text-slate-400">IG Business Account ID:</span>
+                            <span className="text-slate-900 dark:text-slate-100 font-mono text-xs">
+                              {tokenInfo.igBusinessAccountId}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>

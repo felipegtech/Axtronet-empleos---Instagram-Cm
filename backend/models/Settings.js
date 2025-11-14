@@ -10,6 +10,14 @@ const settingsSchema = new mongoose.Schema({
       type: String,
       default: null
     },
+    tokenExpiresAt: {
+      type: Date,
+      default: null
+    },
+    igBusinessAccountId: {
+      type: String,
+      default: null
+    },
     webhookUrl: {
       type: String,
       default: null
@@ -25,7 +33,10 @@ const settingsSchema = new mongoose.Schema({
     connected: {
       type: Boolean,
       default: false
-    }
+    },
+    tokenScopes: [{
+      type: String
+    }]
   },
   notifications: {
     enabled: {
